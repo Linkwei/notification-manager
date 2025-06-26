@@ -7,10 +7,11 @@ const (
 	// Post message is Rich Text Format(RTF).  RTF is a file format that lets you exchange text
 	// files between different word processors in different operating systems.
 	// More info: https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/im-v1/message/create_json#45e0953e
-	Post    = "post"
-	Aliyun  = "aliyun"
-	Tencent = "tencent"
-	AWS     = "aws"
+	Post        = "post"
+	Interactive = "interactive"
+	Aliyun      = "aliyun"
+	Tencent     = "tencent"
+	AWS         = "aws"
 
 	DingTalk = "dingtalk"
 	Email    = "email"

@@ -83,8 +83,8 @@ func (r *Receiver) Validate() error {
 		return fmt.Errorf("feishu receiver: must specify one of: `user`, `department` or `chatbot`")
 	}
 
-	if r.TmplType != "" && r.TmplType != constants.Text && r.TmplType != constants.Post {
-		return fmt.Errorf("feishu Receiver: tmplType must be one of: `text` or `post`")
+	if r.TmplType != "" && r.TmplType != constants.Text && r.TmplType != constants.Post && r.TmplType != constants.Interactive {
+		return fmt.Errorf("feishu Receiver: tmplType must be one of: `text`, `post` or `interactive`")
 	}
 
 	if (len(r.User) > 0 || len(r.Department) > 0) && r.Config == nil {
