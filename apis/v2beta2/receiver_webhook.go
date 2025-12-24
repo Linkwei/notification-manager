@@ -352,9 +352,9 @@ func (r *Receiver) validateReceiver() (warnings admission.Warnings, err error) {
 
 	if r.Spec.Feishu != nil {
 		feishu := r.Spec.Feishu
-		if len(feishu.User) == 0 && len(feishu.Department) == 0 && feishu.ChatBot == nil {
+		if len(feishu.User) == 0 && len(feishu.Department) == 0 && len(feishu.ChatIDs) == 0 && feishu.ChatBot == nil {
 			allErrs = append(allErrs, field.Required(field.NewPath("spec", "feishu"),
-				"must specify one of: `user`, `department` or `chatbot`"))
+				"must specify one of: `user`, `department`, `chatids` or `chatbot`"))
 		}
 
 		if err := validateSelector(r.Spec.Feishu.AlertSelector); err != nil {

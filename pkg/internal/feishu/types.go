@@ -14,6 +14,7 @@ type Receiver struct {
 	*internal.Common
 	User       []string `json:"user,omitempty"`
 	Department []string `json:"department,omitempty"`
+	ChatIDs    []string `json:"chatids,omitempty"`
 	ChatBot    *ChatBot `json:"chatbot,omitempty"`
 	*Config
 }
@@ -44,6 +45,7 @@ func NewReceiver(tenantID string, obj *v2beta2.Receiver) internal.Receiver {
 		},
 		User:       f.User,
 		Department: f.Department,
+		ChatIDs:    f.ChatIDs,
 	}
 
 	r.ResourceVersion, _ = strconv.ParseUint(obj.ResourceVersion, 10, 64)
@@ -79,15 +81,15 @@ func (r *Receiver) SetConfig(c internal.Config) {
 
 func (r *Receiver) Validate() error {
 
-	if len(r.User) == 0 && len(r.Department) == 0 && r.ChatBot == nil {
-		return fmt.Errorf("feishu receiver: must specify one of: `user`, `department` or `chatbot`")
+	if len(r.User) == 0 && len(r.Department) == 0 && len(r.ChatIDs) == 0 && r.ChatBot == nil {
+		return fmt.Errorf("feishu receiver: must specify one of: `user`, `department`, `chatids` or `chatbot`")
 	}
 
 	if r.TmplType != "" && r.TmplType != constants.Text && r.TmplType != constants.Post && r.TmplType != constants.Interactive {
 		return fmt.Errorf("feishu Receiver: tmplType must be one of: `text`, `post` or `interactive`")
 	}
 
-	if (len(r.User) > 0 || len(r.Department) > 0) && r.Config == nil {
+	if (len(r.User) > 0 || len(r.Department) > 0 || len(r.ChatIDs) > 0) && r.Config == nil {
 		return fmt.Errorf("feishu receiver: config is nil")
 	}
 
@@ -101,6 +103,7 @@ func (r *Receiver) Clone() internal.Receiver {
 		Config:     r.Config,
 		User:       r.User,
 		Department: r.Department,
+		ChatIDs:    r.ChatIDs,
 		ChatBot:    r.ChatBot,
 	}
 }
@@ -117,6 +120,10 @@ func (r *Receiver) GetChannels() (string, interface{}) {
 
 	if len(r.Department) > 0 {
 		m["department"] = r.Department
+	}
+
+	if len(r.ChatIDs) > 0 {
+		m["chatids"] = r.ChatIDs
 	}
 
 	if len(m) == 0 {

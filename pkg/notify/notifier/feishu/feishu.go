@@ -28,6 +28,7 @@ import (
 const (
 	TokenAPI                   = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
 	BatchAPI                   = "https://open.feishu.cn/open-apis/message/v4/batch_send/"
+	SendAPI                    = "https://open.feishu.cn/open-apis/message/v4/send/"
 	DefaultSendTimeout         = time.Second * 3
 	DefaultPostTemplate        = `{{ template "nm.feishu.post" . }}`
 	DefaultTextTemplate        = `{{ template "nm.feishu.text" . }}`
@@ -84,6 +85,18 @@ type InteractiveMessage struct {
 	User       []string    `json:"user_ids,omitempty"`
 	Timestamp  int64       `json:"timestamp,omitempty"`
 	Sign       string      `json:"sign,omitempty"`
+}
+
+type ChatMessage struct {
+	ChatID  string         `json:"chat_id"`
+	MsgType string         `json:"msg_type"`
+	Content messageContent `json:"content"`
+}
+
+type InteractiveChatMessage struct {
+	ChatID  string      `json:"chat_id"`
+	MsgType string      `json:"msg_type"`
+	Card    interface{} `json:"card"`
 }
 
 func NewFeishuNotifier(logger log.Logger, receiver internal.Receiver, notifierCtl *controller.Controller) (notifier.Notifier, error) {
@@ -155,7 +168,8 @@ func NewFeishuNotifier(logger log.Logger, receiver internal.Receiver, notifierCt
 
 	_ = level.Info(logger).Log("msg", "FeishuNotifier: created successfully",
 		"receiverName", n.receiver.Name, "hasChatBot", n.receiver.ChatBot != nil,
-		"userCount", len(n.receiver.User), "departmentCount", len(n.receiver.Department))
+		"userCount", len(n.receiver.User), "departmentCount", len(n.receiver.Department),
+		"chatIDCount", len(n.receiver.ChatIDs))
 
 	return n, nil
 }
@@ -210,6 +224,25 @@ func (n *Notifier) Notify(ctx context.Context, data *template.Data) error {
 				}
 			} else {
 				_ = level.Error(n.logger).Log("msg", "FeishuNotifier: batch notification failed", "error", err.Error())
+			}
+			stopCh <- err
+		})
+	}
+
+	if len(n.receiver.ChatIDs) > 0 {
+		_ = level.Info(n.logger).Log("msg", "FeishuNotifier: adding chat send task",
+			"chatIDCount", len(n.receiver.ChatIDs),
+			"chatIDs", utils.ArrayToString(n.receiver.ChatIDs, ","))
+
+		group.Add(func(stopCh chan interface{}) {
+			err := n.sendToChat(ctx, content)
+			if err == nil {
+				_ = level.Info(n.logger).Log("msg", "FeishuNotifier: chat notification sent successfully")
+				if n.sentSuccessfulHandler != nil {
+					(*n.sentSuccessfulHandler)(data.Alerts)
+				}
+			} else {
+				_ = level.Error(n.logger).Log("msg", "FeishuNotifier: chat notification failed", "error", err.Error())
 			}
 			stopCh <- err
 		})
@@ -773,4 +806,220 @@ func (n *Notifier) sendToChatBotInteractive(ctx context.Context, content string)
 		_ = level.Info(n.logger).Log("msg", "FeishuNotifier: interactive chatbot notification completed", "retry", retry, "success", err == nil)
 		return err
 	}
+}
+
+func (n *Notifier) sendToChat(ctx context.Context, content string) error {
+	_ = level.Info(n.logger).Log("msg", "FeishuNotifier: starting chat notification",
+		"tmplType", n.receiver.TmplType, "contentLength", len(content),
+		"chatIDCount", len(n.receiver.ChatIDs))
+
+	// Interactive类型单独处理，使用InteractiveChatMessage结构
+	if n.receiver.TmplType == constants.Interactive {
+		return n.sendToChatInteractive(ctx, content)
+	}
+
+	send := func(chatID string, retry int) (bool, error) {
+		if n.receiver.Config == nil {
+			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: config is nil", "chatID", chatID)
+			return false, utils.Error("FeishuNotifier: config is nil")
+		}
+
+		accessToken, err := n.getToken(ctx, n.receiver)
+		if err != nil {
+			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: get token failed", "error", err.Error(), "retry", retry, "chatID", chatID)
+			return false, err
+		}
+
+		message := &ChatMessage{
+			ChatID:  chatID,
+			MsgType: n.receiver.TmplType,
+		}
+
+		if n.receiver.TmplType == constants.Post {
+			post := make(map[string]interface{})
+			if err := json.Unmarshal([]byte(content), &post); err != nil {
+				_ = level.Error(n.logger).Log("msg", "FeishuNotifier: unmarshal failed", "error", err, "chatID", chatID)
+				return false, err
+			}
+			message.Content.Post = post
+		} else if n.receiver.TmplType == constants.Text {
+			message.Content.Text = content
+		} else {
+			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: unknown message type", "type", n.receiver.TmplType, "chatID", chatID)
+			return false, utils.Errorf("Unknown message type, %s", n.receiver.TmplType)
+		}
+
+		var buf bytes.Buffer
+		if err := utils.JsonEncode(&buf, message); err != nil {
+			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: json encode failed", "error", err.Error(), "retry", retry, "chatID", chatID)
+			return false, err
+		}
+
+		request, err := http.NewRequest(http.MethodPost, SendAPI, &buf)
+		if err != nil {
+			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: create HTTP request failed", "error", err.Error(), "retry", retry, "chatID", chatID)
+			return false, err
+		}
+		request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
+		request.Header.Set("Content-Type", "application/json; charset=utf-8")
+
+		respBody, err := utils.DoHttpRequest(ctx, nil, request)
+		if err != nil {
+			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: HTTP request failed", "error", err.Error(), "retry", retry, "chatID", chatID)
+			return false, err
+		}
+
+		var resp Response
+		if err := utils.JsonUnmarshal(respBody, &resp); err != nil {
+			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: unmarshal response failed", "error", err.Error(), "retry", retry, "chatID", chatID)
+			return false, err
+		}
+
+		if resp.Code == 0 {
+			_ = level.Info(n.logger).Log("msg", "FeishuNotifier: chat message sent successfully", "retry", retry, "chatID", chatID)
+			return false, nil
+		}
+
+		// 11232 means the API call exceeds the limit, need to retry.
+		if resp.Code == ExceedLimitCode {
+			_ = level.Warn(n.logger).Log("msg", "FeishuNotifier: API rate limit exceeded, will retry", "code", resp.Code, "msg", resp.Msg, "retry", retry, "chatID", chatID)
+			return true, utils.Errorf("%d, %s", resp.Code, resp.Msg)
+		}
+
+		// 打印请求参数到日志
+		requestBody, _ := utils.JsonMarshal(message)
+		_ = level.Error(n.logger).Log("msg", "FeishuNotifier: chat message failed", "code", resp.Code, "msg", resp.Msg, "retry", retry, "chatID", chatID, "requestBody", string(requestBody))
+		return false, utils.Errorf("%d, %s", resp.Code, resp.Msg)
+	}
+
+	group := async.NewGroup(ctx)
+	for _, chatID := range n.receiver.ChatIDs {
+		id := chatID
+		group.Add(func(stopCh chan interface{}) {
+			retry := 0
+			// The retries will continue until the send times out and the context is cancelled.
+			// There is only one case that triggers the retry mechanism, that is, the API call exceeds the limit.
+			// The maximum frequency for sending notifications to the same chat is 5 times/second.
+			for {
+				needRetry, err := send(id, retry)
+				if err != nil {
+					_ = level.Error(n.logger).Log("msg", "FeishuNotifier: send notification to chat error", "error", err, "retry", retry, "chatID", id)
+				}
+				if needRetry {
+					retry = retry + 1
+					_ = level.Info(n.logger).Log("msg", "FeishuNotifier: retry to send notification to chat", "retry", retry, "chatID", id)
+					time.Sleep(time.Second)
+					continue
+				}
+
+				_ = level.Info(n.logger).Log("msg", "FeishuNotifier: chat notification completed", "retry", retry, "success", err == nil, "chatID", id)
+				stopCh <- err
+				return
+			}
+		})
+	}
+
+	return group.Wait()
+}
+
+func (n *Notifier) sendToChatInteractive(ctx context.Context, content string) error {
+	_ = level.Info(n.logger).Log("msg", "FeishuNotifier: starting interactive chat notification",
+		"contentLength", len(content),
+		"chatIDCount", len(n.receiver.ChatIDs))
+
+	// 解析Interactive卡片内容
+	card := make(map[string]interface{})
+	if err := json.Unmarshal([]byte(content), &card); err != nil {
+		_ = level.Error(n.logger).Log("msg", "FeishuNotifier: unmarshal interactive card failed", "error", err, "content", content)
+		return err
+	}
+
+	send := func(chatID string, retry int) (bool, error) {
+		if n.receiver.Config == nil {
+			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: config is nil", "chatID", chatID)
+			return false, utils.Error("FeishuNotifier: config is nil")
+		}
+
+		accessToken, err := n.getToken(ctx, n.receiver)
+		if err != nil {
+			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: get token failed for interactive message", "error", err.Error(), "retry", retry, "chatID", chatID)
+			return false, err
+		}
+
+		// 创建Interactive消息，使用InteractiveChatMessage结构
+		interactiveMessage := &InteractiveChatMessage{
+			ChatID:  chatID,
+			MsgType: constants.Interactive,
+			Card:    card,
+		}
+
+		var buf bytes.Buffer
+		if err := utils.JsonEncode(&buf, interactiveMessage); err != nil {
+			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: json encode failed for interactive message", "error", err.Error(), "retry", retry, "chatID", chatID)
+			return false, err
+		}
+
+		request, err := http.NewRequest(http.MethodPost, SendAPI, &buf)
+		if err != nil {
+			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: create HTTP request failed for interactive message", "error", err.Error(), "retry", retry, "chatID", chatID)
+			return false, err
+		}
+		request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
+		request.Header.Set("Content-Type", "application/json; charset=utf-8")
+
+		respBody, err := utils.DoHttpRequest(ctx, nil, request)
+		if err != nil {
+			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: HTTP request failed for interactive message", "error", err.Error(), "retry", retry, "chatID", chatID)
+			return false, err
+		}
+
+		var resp Response
+		if err := utils.JsonUnmarshal(respBody, &resp); err != nil {
+			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: unmarshal response failed for interactive message", "error", err.Error(), "retry", retry, "chatID", chatID)
+			return false, err
+		}
+
+		if resp.Code == 0 {
+			_ = level.Info(n.logger).Log("msg", "FeishuNotifier: interactive chat message sent successfully", "retry", retry, "chatID", chatID)
+			return false, nil
+		}
+
+		// 11232 means the API call exceeds the limit, need to retry.
+		if resp.Code == ExceedLimitCode {
+			_ = level.Warn(n.logger).Log("msg", "FeishuNotifier: API rate limit exceeded for interactive chat, will retry", "code", resp.Code, "msg", resp.Msg, "retry", retry, "chatID", chatID)
+			return true, utils.Errorf("%d, %s", resp.Code, resp.Msg)
+		}
+
+		_ = level.Error(n.logger).Log("msg", "FeishuNotifier: interactive chat message failed", "code", resp.Code, "msg", resp.Msg, "retry", retry, "chatID", chatID)
+		return false, utils.Errorf("%d, %s", resp.Code, resp.Msg)
+	}
+
+	group := async.NewGroup(ctx)
+	for _, chatID := range n.receiver.ChatIDs {
+		id := chatID
+		group.Add(func(stopCh chan interface{}) {
+			retry := 0
+			// The retries will continue until the send times out and the context is cancelled.
+			// There is only one case that triggers the retry mechanism, that is, the API call exceeds the limit.
+			// The maximum frequency for sending notifications to the same chat is 5 times/second.
+			for {
+				needRetry, err := send(id, retry)
+				if err != nil {
+					_ = level.Error(n.logger).Log("msg", "FeishuNotifier: send interactive notification to chat error", "error", err, "retry", retry, "chatID", id)
+				}
+				if needRetry {
+					retry = retry + 1
+					_ = level.Info(n.logger).Log("msg", "FeishuNotifier: retry to send interactive notification to chat", "retry", retry, "chatID", id)
+					time.Sleep(time.Second)
+					continue
+				}
+
+				_ = level.Info(n.logger).Log("msg", "FeishuNotifier: interactive chat notification completed", "retry", retry, "success", err == nil, "chatID", id)
+				stopCh <- err
+				return
+			}
+		})
+	}
+
+	return group.Wait()
 }
