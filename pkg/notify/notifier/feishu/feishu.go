@@ -593,6 +593,24 @@ func genSign(secret string, timestamp int64) (string, error) {
 	return signature, nil
 }
 
+// setCardUpdateMulti 设置卡片的 update_multi 属性为 true
+// update_multi 用于启用共享卡片功能，允许多个会话共享同一个卡片实例
+func setCardUpdateMulti(card map[string]interface{}) {
+	if card == nil {
+		return
+	}
+
+	// 确保 config 字段存在
+	config, ok := card["config"].(map[string]interface{})
+	if !ok {
+		config = make(map[string]interface{})
+		card["config"] = config
+	}
+
+	// 设置 update_multi 为 true
+	config["update_multi"] = true
+}
+
 func (n *Notifier) batchSendInteractive(ctx context.Context, content string) error {
 	_ = level.Info(n.logger).Log("msg", "FeishuNotifier: starting interactive batch send notification",
 		"contentLength", len(content),
@@ -608,6 +626,9 @@ func (n *Notifier) batchSendInteractive(ctx context.Context, content string) err
 		return err
 	}
 
+	// 设置 update_multi 属性为 true，启用共享卡片功能
+	setCardUpdateMulti(card)
+
 	interactiveMessage.Card = card
 
 	interactiveMessage.User = n.receiver.User
@@ -621,9 +642,16 @@ func (n *Notifier) batchSendInteractive(ctx context.Context, content string) err
 
 		accessToken, err := n.getToken(ctx, n.receiver)
 		if err != nil {
-			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: get token failed for interactive message", "error", err.Error(), "retry", retry)
+			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: get tenant_access_token failed for interactive batch message", "error", err.Error(), "retry", retry)
 			return false, err
 		}
+
+		if accessToken == "" {
+			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: tenant_access_token is empty for interactive batch message", "retry", retry)
+			return false, utils.Error("FeishuNotifier: tenant_access_token is empty")
+		}
+
+		_ = level.Debug(n.logger).Log("msg", "FeishuNotifier: using tenant_access_token to send interactive batch message", "retry", retry)
 
 		var buf bytes.Buffer
 		if err := utils.JsonEncode(&buf, interactiveMessage); err != nil {
@@ -715,6 +743,9 @@ func (n *Notifier) sendToChatBotInteractive(ctx context.Context, content string)
 		_ = level.Error(n.logger).Log("msg", "FeishuNotifier: unmarshal interactive card failed", "error", err, "content", content)
 		return err
 	}
+
+	// 设置 update_multi 属性为 true，启用共享卡片功能
+	setCardUpdateMulti(card)
 
 	interactiveMessage.Card = card
 
@@ -826,9 +857,16 @@ func (n *Notifier) sendToChat(ctx context.Context, content string) error {
 
 		accessToken, err := n.getToken(ctx, n.receiver)
 		if err != nil {
-			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: get token failed", "error", err.Error(), "retry", retry, "chatID", chatID)
+			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: get tenant_access_token failed", "error", err.Error(), "retry", retry, "chatID", chatID)
 			return false, err
 		}
+
+		if accessToken == "" {
+			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: tenant_access_token is empty", "retry", retry, "chatID", chatID)
+			return false, utils.Error("FeishuNotifier: tenant_access_token is empty")
+		}
+
+		_ = level.Debug(n.logger).Log("msg", "FeishuNotifier: using tenant_access_token to send message", "retry", retry, "chatID", chatID)
 
 		message := &ChatMessage{
 			ChatID:  chatID,
@@ -934,6 +972,9 @@ func (n *Notifier) sendToChatInteractive(ctx context.Context, content string) er
 		return err
 	}
 
+	// 设置 update_multi 属性为 true，启用共享卡片功能
+	setCardUpdateMulti(card)
+
 	send := func(chatID string, retry int) (bool, error) {
 		if n.receiver.Config == nil {
 			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: config is nil", "chatID", chatID)
@@ -942,9 +983,16 @@ func (n *Notifier) sendToChatInteractive(ctx context.Context, content string) er
 
 		accessToken, err := n.getToken(ctx, n.receiver)
 		if err != nil {
-			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: get token failed for interactive message", "error", err.Error(), "retry", retry, "chatID", chatID)
+			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: get tenant_access_token failed for interactive message", "error", err.Error(), "retry", retry, "chatID", chatID)
 			return false, err
 		}
+
+		if accessToken == "" {
+			_ = level.Error(n.logger).Log("msg", "FeishuNotifier: tenant_access_token is empty for interactive message", "retry", retry, "chatID", chatID)
+			return false, utils.Error("FeishuNotifier: tenant_access_token is empty")
+		}
+
+		_ = level.Debug(n.logger).Log("msg", "FeishuNotifier: using tenant_access_token to send interactive message", "retry", retry, "chatID", chatID)
 
 		// 创建Interactive消息，使用InteractiveChatMessage结构
 		interactiveMessage := &InteractiveChatMessage{
